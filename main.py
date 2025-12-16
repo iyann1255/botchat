@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+import re
 from typing import Dict, Any, Optional
 from urllib.parse import urlencode
 
@@ -29,26 +30,25 @@ DATA_FILE = os.getenv("DATA_FILE", "chatbot_data.json")
 DEFAULT_ROLE = (
     "Kamu manusia asli, bukan bot dan bukan AI.\n"
     "Kamu sedang ngobrol santai di grup Telegram.\n\n"
-
     "Aturan utama:\n"
     "- Jawab SINGKAT, maksimal 1–3 kalimat.\n"
     "- Jangan jelasin panjang kecuali diminta.\n"
     "- Kalau bisa satu kalimat, cukup satu.\n"
     "- Jangan pakai bahasa formal atau gaya esai.\n\n"
-
     "Gaya bicara:\n"
     "- Santai, gen-z, natural\n"
     "- Kayak manusia bales chat\n"
     "- 0–1 emoji kalau perlu\n\n"
-
     "Kalau ditanya 'kamu bot ya?' → ngeles santai.\n"
     "Intinya: balas kayak manusia, bukan mesin."
 )
 
-
-
 SIPUTZX_GPT3_URL = os.getenv("SIPUTZX_GPT3_URL", "https://api.siputzx.my.id/api/ai/gpt3").strip()
 SIPUTZX_GPT_URL = os.getenv("SIPUTZX_GPT_URL", "https://apis-liart.vercel.app/api/gpt").strip()
+
+# Hard limiter settings (biar selalu singkat)
+MAX_SENTENCES = int(os.getenv("MAX_SENTENCES", "2"))   # 1 atau 2 recommended
+MAX_CHARS = int(os.getenv("MAX_CHARS", "280"))         # 200-320 enak buat chat
 
 # =========================
 # LOGGING
@@ -95,20 +95,40 @@ def get_chat_cfg(chat_id: int) -> Dict[str, Any]:
 
 
 # =========================
+# RESPONSE LIMITER
+# =========================
+def limit_response(text: str, max_sentences: int = 2, max_chars: int = 280) -> str:
+    if not text:
+        return text
+
+    # buang markdown heading / list yang bikin jadi "artikel"
+    text = re.sub(r"^\s*#{1,6}\s+.*$", "", text, flags=re.MULTILINE).strip()
+
+    # potong karakter dulu
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+
+    # split kalimat
+    parts = re.split(r'(?<=[.!?])\s+', text)
+    short = " ".join(parts[:max_sentences]).strip()
+
+    # kalau gak ada tanda baca, minimal tetap max_chars
+    return short if short else text
+
+
+# =========================
 # FALLBACK LOCAL REPLY
 # =========================
 def fallback_reply(user_text: str) -> str:
     t = (user_text or "").strip().lower()
     if not t:
-        return "Ketik sesuatu dulu dong. Masa gue disuruh nebak isi pikiran kamu."
+        return "Ketik dulu dong."
 
     if t in {"hai", "halo", "hi", "p"}:
-        return "Halo. Gas, mau bahas apa?"
+        return "Halo. Kenapa?"
 
-    return (
-        "Backend AI lagi error / endpoint lagi berubah. Jadi gue fallback dulu.\n\n"
-        f"Pesan kamu: {user_text[:1500]}"
-    )
+    return "Lagi error bentar, coba ulang ya."
 
 
 # =========================
@@ -158,13 +178,11 @@ async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYP
                     val = js.get("data")
                     if isinstance(val, str) and val.strip():
                         return val.strip()
-
                     if isinstance(val, dict):
                         c = val.get("content")
                         if isinstance(c, str) and c.strip():
                             return c.strip()
 
-                    # fallback: string lain
                     for v in js.values():
                         if isinstance(v, str) and v.strip():
                             return v.strip()
@@ -206,13 +224,10 @@ async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYP
 # =========================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "Oke, gue online.\n\n"
-        "Perintah:\n"
-        "• /chat on  — auto-reply semua pesan di chat ini\n"
-        "• /chat off — matiin auto-reply\n"
-        "• /setrole <teks> — atur gaya/role chatbot\n"
-        "• /role — lihat role saat ini\n\n"
-        "Default: bot cuma bales kalau kamu reply ke pesan bot."
+        "On.\n\n"
+        "• /chat on|off\n"
+        "• /setrole <teks>\n"
+        "• /role"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -225,24 +240,24 @@ async def chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cfg["enabled"] = (arg == "on")
     save_data()
-    await update.message.reply_text(f"Mode auto-reply: {'AKTIF' if cfg['enabled'] else 'MATI'}")
+    await update.message.reply_text(f"{'AKTIF' if cfg['enabled'] else 'MATI'}")
 
 
 async def setrole_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = get_chat_cfg(update.effective_chat.id)
     role = " ".join(context.args).strip()
     if not role:
-        return await update.message.reply_text("Pakai: /setrole kamu adalah ...")
+        return await update.message.reply_text("Pakai: /setrole ...")
 
     cfg["role"] = role[:3000]
     save_data()
-    await update.message.reply_text("Role di-update.")
+    await update.message.reply_text("Ok.")
 
 
 async def role_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = get_chat_cfg(update.effective_chat.id)
     role = cfg.get("role") or DEFAULT_ROLE
-    await update.message.reply_text(f"Role saat ini:\n\n{role}")
+    await update.message.reply_text(f"Role:\n\n{role}")
 
 
 # =========================
@@ -275,9 +290,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not answer:
         answer = fallback_reply(user_text)
 
-    answer = answer.strip()
-    if len(answer) > 4000:
-        answer = answer[:4000]
+    # 🔥 paksa pendek (ini yang bikin gak jadi esai)
+    answer = limit_response(answer, max_sentences=MAX_SENTENCES, max_chars=MAX_CHARS)
 
     await msg.reply_text(answer, disable_web_page_preview=True)
 
@@ -298,7 +312,7 @@ def main():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .post_shutdown(close_session)  # ini yang bener untuk v21+
+        .post_shutdown(close_session)
         .build()
     )
 
