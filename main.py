@@ -288,9 +288,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    answer = await call_siputzx(prompt=user_text, role=role, context=context)
-    if not answer:
-        answer = fallback_reply(user_text)
+    try:
+    answer = await asyncio.wait_for(
+        call_siputzx(prompt=user_text, role=role, context=context),
+        timeout=FAST_TIMEOUT,
+    )
+except asyncio.TimeoutError:
+    answer = None
+
+if not answer:
+    answer = fallback_reply(user_text)
 
     # 🔥 paksa pendek (ini yang bikin gak jadi esai)
     answer = limit_response(answer, max_sentences=MAX_SENTENCES, max_chars=MAX_CHARS)
