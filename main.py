@@ -25,6 +25,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8310675088:AAFCjnUBSwwQi8ADjITPOe6hMcdBgWInR
 if not BOT_TOKEN:
     raise SystemExit("ENV BOT_TOKEN belum diisi.")
 
+FAST_TIMEOUT = float(os.getenv("FAST_TIMEOUT", "4"))  # detik, 4-8 recommended
+
 DATA_FILE = os.getenv("DATA_FILE", "chatbot_data.json")
 
 DEFAULT_ROLE = (
