@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 
 import aiohttp
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -18,23 +18,24 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
+# Disarankan: JANGAN hardcode token. Pake ENV BOT_TOKEN.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "7714224903:AAEI8X6z_A34C5mDlOQcCaTXBkKnp5Q0uTs").strip()
 if not BOT_TOKEN:
     raise SystemExit("ENV BOT_TOKEN belum diisi.")
 
 DATA_FILE = os.getenv("DATA_FILE", "chatbot_data.json")
 
-# Default role (gaya ubot: santai, gen-z, cepat, ga lebay)
 DEFAULT_ROLE = (
     "Kamu adalah chatbot Telegram yang gaya jawabnya santai, to-the-point, sedikit humor cerdas kalau pas, "
     "dan bantuin user dengan solusi yang jelas. Jangan pakai emoji berlebihan."
 )
 
-# Siputzx endpoint (PERLU DISESUAIKAN kalau endpoint berubah)
-# Coba cek dokumentasi: https://api.siputzx.my.id/
+# Endpoint Siputzx (sesuaikan kalau berubah)
 SIPUTZX_URL = os.getenv("SIPUTZX_URL", "https://api.siputzx.my.id/api/ai/gpt3")
 
-# Logging
+# =========================
+# LOGGING
+# =========================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -44,15 +45,6 @@ log = logging.getLogger("chatbot-bot")
 # =========================
 # STORAGE
 # =========================
-# Struktur:
-# data = {
-#   "chats": {
-#      "<chat_id>": {
-#          "role": "...",
-#          "enabled": true/false
-#      }
-#   }
-# }
 data: Dict[str, Any] = {"chats": {}}
 
 
@@ -62,7 +54,7 @@ def load_data() -> None:
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if "chats" not in data:
+            if "chats" not in data or not isinstance(data["chats"], dict):
                 data = {"chats": {}}
         except Exception:
             log.exception("Gagal load data, reset.")
@@ -83,6 +75,16 @@ def get_chat_cfg(chat_id: int) -> Dict[str, Any]:
         data["chats"][cid] = {"role": DEFAULT_ROLE, "enabled": False}
         save_data()
     return data["chats"][cid]
+
+
+# =========================
+# FALLBACK
+# =========================
+def fallback_reply(user_text: str) -> str:
+    return (
+        "Backend AI lagi error / endpoint lagi berubah. Jadi gue fallback dulu.\n\n"
+        f"Pesan kamu: {user_text[:1500]}"
+    )
 
 
 # =========================
@@ -107,18 +109,17 @@ async def call_siputzx(prompt: str, role: str, timeout_s: int = 25) -> Optional[
                     log.warning("Siputzx non-200: %s %s", r.status, raw[:500])
                     return None
 
-                # Kadang API balikin JSON, kadang text-json
                 try:
                     js = json.loads(raw)
                 except Exception:
                     return raw.strip() if raw.strip() else None
 
-        # Normalisasi output (karena format bisa beda-beda)
-        # Coba gaya OpenAI-ish: choices[0].message.content
+        # Normalisasi output (format bisa beda-beda)
         if isinstance(js, dict):
+            # OpenAI-ish: choices[0].message.content
             choices = js.get("choices")
-            if isinstance(choices, list) and choices:
-                msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message")
                 if isinstance(msg, dict):
                     content = msg.get("content")
                     if isinstance(content, str) and content.strip():
@@ -143,7 +144,7 @@ async def call_siputzx(prompt: str, role: str, timeout_s: int = 25) -> Optional[
                 if ok and isinstance(cur, str) and cur.strip():
                     return cur.strip()
 
-            # Last resort: cari string pertama yang masuk akal
+            # Last resort: string value pertama
             for v in js.values():
                 if isinstance(v, str) and v.strip():
                     return v.strip()
@@ -157,12 +158,11 @@ async def call_siputzx(prompt: str, role: str, timeout_s: int = 25) -> Optional[
         return None
 
 
-
 # =========================
 # COMMANDS
 # =========================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg = get_chat_cfg(update.effective_chat.id)
+    _ = get_chat_cfg(update.effective_chat.id)
     text = (
         "Oke, gue online.\n\n"
         "Perintah:\n"
@@ -170,7 +170,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /chat off — matiin auto-reply\n"
         "• /setrole <teks> — atur gaya/role chatbot\n"
         "• /role — lihat role saat ini\n\n"
-        "Mode default: bot cuma bales kalau kamu *reply* ke pesan bot."
+        "Mode default: bot cuma bales kalau kamu reply ke pesan bot."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -196,7 +196,6 @@ async def setrole_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not role:
         return await update.message.reply_text("Pakai: /setrole kamu adalah ...")
 
-    # batasi biar gak absurd panjang
     cfg["role"] = role[:3000]
     save_data()
     await update.message.reply_text("Role di-update. Sekarang bot bakal jawab sesuai style itu.")
@@ -223,12 +222,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
 
-    # Trigger rules:
-    # 1) jika user reply ke pesan bot
+    # Trigger:
+    # 1) user reply ke pesan bot
     replied_to_bot = False
     if msg.reply_to_message and msg.reply_to_message.from_user:
-        bot_user = context.bot.id
-        replied_to_bot = (msg.reply_to_message.from_user.id == bot_user)
+        replied_to_bot = (msg.reply_to_message.from_user.id == context.bot.id)
 
     # 2) atau mode auto-reply aktif
     if not replied_to_bot and not cfg.get("enabled", False):
@@ -236,21 +234,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     role = cfg.get("role") or DEFAULT_ROLE
 
-    # Kasih indikator "typing..."
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     answer = await call_siputzx(prompt=user_text, role=role)
     if not answer:
         answer = fallback_reply(user_text)
 
-    # Biar tetap "rep pesan yang dia jawab"
-    # - kalau user reply ke pesan bot: balas ke message user tsb
-    # - kalau mode auto: juga reply ke message user biar kerasa nyambung
     try:
         await msg.reply_text(answer[:4000], disable_web_page_preview=True)
     except Exception:
-        # Telegram limit / parse issue
         await msg.reply_text(answer[:3500], disable_web_page_preview=True)
+
+
+# =========================
+# ERROR HANDLER
+# =========================
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.exception("Unhandled error", exc_info=context.error)
 
 
 # =========================
@@ -267,6 +267,8 @@ def main():
     app.add_handler(CommandHandler("role", role_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT | filters.Caption(), handle_message))
+
+    app.add_error_handler(on_error)
 
     log.info("Bot running...")
     app.run_polling(close_loop=False)
