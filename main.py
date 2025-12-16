@@ -90,64 +90,72 @@ def get_chat_cfg(chat_id: int) -> Dict[str, Any]:
 # =========================
 async def call_siputzx(prompt: str, role: str, timeout_s: int = 25) -> Optional[str]:
     """
-    Panggil API Siputzx. Kalau endpoint kamu beda, edit payload/URL di sini.
+    Siputzx endpoint yang butuh format 'messages' (chat-style).
     """
     payload = {
-        "prompt": prompt,
-        "system": role,   # beberapa API pakai "system" / "role" / "context"
+        "messages": [
+            {"role": "system", "content": role},
+            {"role": "user", "content": prompt},
+        ]
     }
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(SIPUTZX_URL, json=payload, timeout=timeout_s) as r:
+                raw = await r.text()
                 if r.status != 200:
-                    text = await r.text()
-                    log.warning("Siputzx non-200: %s %s", r.status, text[:300])
+                    log.warning("Siputzx non-200: %s %s", r.status, raw[:500])
                     return None
-                js = await r.json(content_type=None)
 
-        # Normalisasi hasil (karena tiap API beda)
-        # Coba ambil dari beberapa key umum
-        for key_path in [
-            ("result",),
-            ("data", "result"),
-            ("data", "answer"),
-            ("answer",),
-            ("message",),
-        ]:
-            cur = js
-            ok = True
-            for k in key_path:
-                if isinstance(cur, dict) and k in cur:
-                    cur = cur[k]
-                else:
-                    ok = False
-                    break
-            if ok and isinstance(cur, str) and cur.strip():
-                return cur.strip()
+                # Kadang API balikin JSON, kadang text-json
+                try:
+                    js = json.loads(raw)
+                except Exception:
+                    return raw.strip() if raw.strip() else None
 
-        # kalau formatnya beda, fallback:
+        # Normalisasi output (karena format bisa beda-beda)
+        # Coba gaya OpenAI-ish: choices[0].message.content
         if isinstance(js, dict):
-            # cari string paling masuk akal
+            choices = js.get("choices")
+            if isinstance(choices, list) and choices:
+                msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return content.strip()
+
+            # Format lain yang sering dipakai
+            for key_path in [
+                ("result",),
+                ("data", "result"),
+                ("data", "answer"),
+                ("answer",),
+                ("message",),
+            ]:
+                cur = js
+                ok = True
+                for k in key_path:
+                    if isinstance(cur, dict) and k in cur:
+                        cur = cur[k]
+                    else:
+                        ok = False
+                        break
+                if ok and isinstance(cur, str) and cur.strip():
+                    return cur.strip()
+
+            # Last resort: cari string pertama yang masuk akal
             for v in js.values():
                 if isinstance(v, str) and v.strip():
                     return v.strip()
 
         return None
+
     except asyncio.TimeoutError:
         return None
     except Exception:
         log.exception("Error call_siputzx")
         return None
 
-
-def fallback_reply(user_text: str) -> str:
-    # Fallback aman kalau API error/limit/down
-    return (
-        "Gw nangkep maksudnya, tapi backend AI lagi ngambek (atau endpoint-nya berubah).\n"
-        f"Pesan kamu: `{user_text[:800]}`\n\n"
-        "Kalau mau, aktifin log dan kirim error-nya, biar gue setel endpoint Siputzx-nya sampai waras."
-    )
 
 
 # =========================
