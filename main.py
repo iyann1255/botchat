@@ -10,6 +10,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -25,21 +26,17 @@ if not BOT_TOKEN:
 
 DATA_FILE = os.getenv("DATA_FILE", "chatbot_data.json")
 
-# Default role (gaya ubot: santai, gen-z, cepat, ga lebay)
 DEFAULT_ROLE = (
     "Kamu adalah chatbot Telegram yang gaya jawabnya santai, to-the-point, sedikit humor cerdas kalau pas, "
     "dan bantuin user dengan solusi yang jelas. Jangan pakai emoji berlebihan."
 )
 
-# Siputzx endpoint versi gpt3 (umumnya pakai query prompt+content)
-# Contoh yang sering dipakai: /api/ai/gpt3?prompt=...&content=...
 SIPUTZX_GPT3_URL = os.getenv("SIPUTZX_GPT3_URL", "https://api.siputzx.my.id/api/ai/gpt3").strip()
-
-# Fallback endpoint lain yang terbukti jalan di demo Siputzx APIs:
-# /api/gpt?text=...
 SIPUTZX_GPT_URL = os.getenv("SIPUTZX_GPT_URL", "https://apis-liart.vercel.app/api/gpt").strip()
 
-# Logging
+# =========================
+# LOGGING
+# =========================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -49,14 +46,6 @@ log = logging.getLogger("chatbot-bot")
 # =========================
 # STORAGE
 # =========================
-# data = {
-#   "chats": {
-#      "<chat_id>": {
-#          "role": "...",
-#          "enabled": true/false
-#      }
-#   }
-# }
 data: Dict[str, Any] = {"chats": {}}
 
 
@@ -98,23 +87,16 @@ def fallback_reply(user_text: str) -> str:
         return "Ketik sesuatu dulu dong. Masa gue disuruh nebak isi pikiran kamu."
 
     if t in {"hai", "halo", "hi", "p"}:
-        return "Halo. Gas, mau bahas apa? (Yang jelas ya, bukan mantan.)"
+        return "Halo. Gas, mau bahas apa?"
 
-    if "error" in t or "traceback" in t:
-        return (
-            "Oke, kelihatan ada error. Drop log lengkap + potongan kode yang relevan, "
-            "biar gue bedah tanpa drama."
-        )
-
-    # Generic
     return (
-        "Gue nangkep. Tapi biar jawaban gue nggak jadi ‘ngarang elegan’, "
-        "kamu maunya solusi singkat atau step-by-step?"
+        "Backend AI lagi error / endpoint lagi berubah. Jadi gue fallback dulu.\n\n"
+        f"Pesan kamu: {user_text[:1500]}"
     )
 
 
 # =========================
-# HTTP CLIENT (REUSE)
+# HTTP SESSION (REUSE)
 # =========================
 async def get_session(context: ContextTypes.DEFAULT_TYPE) -> aiohttp.ClientSession:
     sess = context.application.bot_data.get("aiohttp_session")
@@ -137,20 +119,14 @@ async def close_session(app: Application) -> None:
 # AI CALL (Siputzx)
 # =========================
 async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-    """
-    Strategi:
-    1) Coba endpoint gpt3 versi query params: ?prompt=...&content=...
-    2) Kalau gagal, fallback endpoint demo: /api/gpt?text=...
-    """
     prompt = (prompt or "").strip()
     role = (role or DEFAULT_ROLE).strip()
-
     if not prompt:
         return None
 
     session = await get_session(context)
 
-    # ---- 1) GPT3 query style: prompt + content
+    # 1) gpt3 query: prompt + content
     try:
         params = {"prompt": role, "content": prompt}
         url = f"{SIPUTZX_GPT3_URL}?{urlencode(params)}"
@@ -162,32 +138,26 @@ async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYP
                 except Exception:
                     return raw.strip() if raw.strip() else None
 
-                # Banyak API Siputzx ngebalikin jawaban di `data`
-                # (lihat contoh pemakaian wrapper umum)
                 if isinstance(js, dict):
-                    # paling sering: { status: true, data: "..." }
                     val = js.get("data")
                     if isinstance(val, str) and val.strip():
                         return val.strip()
 
-                    # alternatif: { success: true, data: { content: "..." } }
-                    data_obj = js.get("data")
-                    if isinstance(data_obj, dict):
-                        c = data_obj.get("content")
+                    if isinstance(val, dict):
+                        c = val.get("content")
                         if isinstance(c, str) and c.strip():
                             return c.strip()
 
-                    # fallback cari string pertama yang masuk akal
+                    # fallback: string lain
                     for v in js.values():
                         if isinstance(v, str) and v.strip():
                             return v.strip()
             else:
-                # log singkat biar nggak spam
                 log.warning("Siputzx gpt3 non-200: %s %s", r.status, raw[:300])
     except Exception:
         log.exception("Error call_siputzx (gpt3)")
 
-    # ---- 2) Fallback: /api/gpt?text=
+    # 2) fallback demo: /api/gpt?text=
     try:
         params = {"text": prompt}
         url = f"{SIPUTZX_GPT_URL}?{urlencode(params)}"
@@ -205,7 +175,6 @@ async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYP
                     if isinstance(content, str) and content.strip():
                         return content.strip()
 
-                # alternatif
                 for k in ("result", "answer", "message", "data"):
                     v = js.get(k)
                     if isinstance(v, str) and v.strip():
@@ -227,7 +196,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /chat off — matiin auto-reply\n"
         "• /setrole <teks> — atur gaya/role chatbot\n"
         "• /role — lihat role saat ini\n\n"
-        "Default: bot cuma bales kalau kamu *reply* ke pesan bot."
+        "Default: bot cuma bales kalau kamu reply ke pesan bot."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -235,16 +204,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = get_chat_cfg(update.effective_chat.id)
     arg = (context.args[0].lower() if context.args else "").strip()
-
     if arg not in ("on", "off"):
         return await update.message.reply_text("Pakai: /chat on atau /chat off")
 
     cfg["enabled"] = (arg == "on")
     save_data()
-
-    await update.message.reply_text(
-        f"Mode auto-reply: {'AKTIF' if cfg['enabled'] else 'MATI'}"
-    )
+    await update.message.reply_text(f"Mode auto-reply: {'AKTIF' if cfg['enabled'] else 'MATI'}")
 
 
 async def setrole_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,7 +220,7 @@ async def setrole_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cfg["role"] = role[:3000]
     save_data()
-    await update.message.reply_text("Role di-update. Sekarang bot bakal jawab sesuai style itu.")
+    await update.message.reply_text("Role di-update.")
 
 
 async def role_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,26 +244,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
 
-    # Trigger rules:
-    # 1) user reply ke pesan bot
     replied_to_bot = False
     if msg.reply_to_message and msg.reply_to_message.from_user:
         replied_to_bot = (msg.reply_to_message.from_user.id == context.bot.id)
 
-    # 2) atau mode auto-reply aktif
     if not replied_to_bot and not cfg.get("enabled", False):
         return
 
     role = cfg.get("role") or DEFAULT_ROLE
 
-    # typing...
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     answer = await call_siputzx(prompt=user_text, role=role, context=context)
     if not answer:
         answer = fallback_reply(user_text)
 
-    # Selalu reply ke pesan user yang ditanya
     answer = answer.strip()
     if len(answer) > 4000:
         answer = answer[:4000]
@@ -319,7 +279,12 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 def main():
     load_data()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_shutdown(close_session)  # ini yang bener untuk v21+
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("chat", chat_cmd))
@@ -327,11 +292,7 @@ def main():
     app.add_handler(CommandHandler("role", role_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT | filters.Caption(), handle_message))
-
     app.add_error_handler(on_error)
-
-    # Pastikan session aiohttp ditutup pas shutdown
-    app.post_shutdown.append(close_session)
 
     log.info("Bot running...")
     app.run_polling(close_loop=False)
