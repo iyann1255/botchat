@@ -3,10 +3,11 @@ import json
 import asyncio
 import logging
 from typing import Dict, Any, Optional
+from urllib.parse import urlencode
 
 import aiohttp
 from telegram import Update
-from telegram.constants import ParseMode, ChatAction
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -18,24 +19,27 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-# Disarankan: JANGAN hardcode token. Pake ENV BOT_TOKEN.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "7714224903:AAEI8X6z_A34C5mDlOQcCaTXBkKnp5Q0uTs").strip()
 if not BOT_TOKEN:
     raise SystemExit("ENV BOT_TOKEN belum diisi.")
 
 DATA_FILE = os.getenv("DATA_FILE", "chatbot_data.json")
 
+# Default role (gaya ubot: santai, gen-z, cepat, ga lebay)
 DEFAULT_ROLE = (
     "Kamu adalah chatbot Telegram yang gaya jawabnya santai, to-the-point, sedikit humor cerdas kalau pas, "
     "dan bantuin user dengan solusi yang jelas. Jangan pakai emoji berlebihan."
 )
 
-# Endpoint Siputzx (sesuaikan kalau berubah)
-SIPUTZX_URL = os.getenv("SIPUTZX_URL", "https://api.siputzx.my.id/api/ai/gpt3")
+# Siputzx endpoint versi gpt3 (umumnya pakai query prompt+content)
+# Contoh yang sering dipakai: /api/ai/gpt3?prompt=...&content=...
+SIPUTZX_GPT3_URL = os.getenv("SIPUTZX_GPT3_URL", "https://api.siputzx.my.id/api/ai/gpt3").strip()
 
-# =========================
-# LOGGING
-# =========================
+# Fallback endpoint lain yang terbukti jalan di demo Siputzx APIs:
+# /api/gpt?text=...
+SIPUTZX_GPT_URL = os.getenv("SIPUTZX_GPT_URL", "https://apis-liart.vercel.app/api/gpt").strip()
+
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -45,6 +49,14 @@ log = logging.getLogger("chatbot-bot")
 # =========================
 # STORAGE
 # =========================
+# data = {
+#   "chats": {
+#      "<chat_id>": {
+#          "role": "...",
+#          "enabled": true/false
+#      }
+#   }
+# }
 data: Dict[str, Any] = {"chats": {}}
 
 
@@ -78,83 +90,129 @@ def get_chat_cfg(chat_id: int) -> Dict[str, Any]:
 
 
 # =========================
-# FALLBACK
+# FALLBACK LOCAL REPLY
 # =========================
 def fallback_reply(user_text: str) -> str:
+    t = (user_text or "").strip().lower()
+    if not t:
+        return "Ketik sesuatu dulu dong. Masa gue disuruh nebak isi pikiran kamu."
+
+    if t in {"hai", "halo", "hi", "p"}:
+        return "Halo. Gas, mau bahas apa? (Yang jelas ya, bukan mantan.)"
+
+    if "error" in t or "traceback" in t:
+        return (
+            "Oke, kelihatan ada error. Drop log lengkap + potongan kode yang relevan, "
+            "biar gue bedah tanpa drama."
+        )
+
+    # Generic
     return (
-        "Backend AI lagi error / endpoint lagi berubah. Jadi gue fallback dulu.\n\n"
-        f"Pesan kamu: {user_text[:1500]}"
+        "Gue nangkep. Tapi biar jawaban gue nggak jadi ‘ngarang elegan’, "
+        "kamu maunya solusi singkat atau step-by-step?"
     )
 
 
 # =========================
-# AI CALL
+# HTTP CLIENT (REUSE)
 # =========================
-async def call_siputzx(prompt: str, role: str, timeout_s: int = 25) -> Optional[str]:
-    """
-    Siputzx endpoint yang butuh format 'messages' (chat-style).
-    """
-    payload = {
-        "messages": [
-            {"role": "system", "content": role},
-            {"role": "user", "content": prompt},
-        ]
-    }
+async def get_session(context: ContextTypes.DEFAULT_TYPE) -> aiohttp.ClientSession:
+    sess = context.application.bot_data.get("aiohttp_session")
+    if sess and not sess.closed:
+        return sess
 
+    timeout = aiohttp.ClientTimeout(total=30)
+    sess = aiohttp.ClientSession(timeout=timeout)
+    context.application.bot_data["aiohttp_session"] = sess
+    return sess
+
+
+async def close_session(app: Application) -> None:
+    sess = app.bot_data.get("aiohttp_session")
+    if sess and not sess.closed:
+        await sess.close()
+
+
+# =========================
+# AI CALL (Siputzx)
+# =========================
+async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    """
+    Strategi:
+    1) Coba endpoint gpt3 versi query params: ?prompt=...&content=...
+    2) Kalau gagal, fallback endpoint demo: /api/gpt?text=...
+    """
+    prompt = (prompt or "").strip()
+    role = (role or DEFAULT_ROLE).strip()
+
+    if not prompt:
+        return None
+
+    session = await get_session(context)
+
+    # ---- 1) GPT3 query style: prompt + content
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(SIPUTZX_URL, json=payload, timeout=timeout_s) as r:
-                raw = await r.text()
-                if r.status != 200:
-                    log.warning("Siputzx non-200: %s %s", r.status, raw[:500])
-                    return None
-
+        params = {"prompt": role, "content": prompt}
+        url = f"{SIPUTZX_GPT3_URL}?{urlencode(params)}"
+        async with session.get(url) as r:
+            raw = await r.text()
+            if r.status == 200:
                 try:
                     js = json.loads(raw)
                 except Exception:
                     return raw.strip() if raw.strip() else None
 
-        # Normalisasi output (format bisa beda-beda)
-        if isinstance(js, dict):
-            # OpenAI-ish: choices[0].message.content
-            choices = js.get("choices")
-            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                msg = choices[0].get("message")
-                if isinstance(msg, dict):
-                    content = msg.get("content")
+                # Banyak API Siputzx ngebalikin jawaban di `data`
+                # (lihat contoh pemakaian wrapper umum)
+                if isinstance(js, dict):
+                    # paling sering: { status: true, data: "..." }
+                    val = js.get("data")
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+
+                    # alternatif: { success: true, data: { content: "..." } }
+                    data_obj = js.get("data")
+                    if isinstance(data_obj, dict):
+                        c = data_obj.get("content")
+                        if isinstance(c, str) and c.strip():
+                            return c.strip()
+
+                    # fallback cari string pertama yang masuk akal
+                    for v in js.values():
+                        if isinstance(v, str) and v.strip():
+                            return v.strip()
+            else:
+                # log singkat biar nggak spam
+                log.warning("Siputzx gpt3 non-200: %s %s", r.status, raw[:300])
+    except Exception:
+        log.exception("Error call_siputzx (gpt3)")
+
+    # ---- 2) Fallback: /api/gpt?text=
+    try:
+        params = {"text": prompt}
+        url = f"{SIPUTZX_GPT_URL}?{urlencode(params)}"
+        async with session.get(url) as r:
+            raw = await r.text()
+            if r.status != 200:
+                log.warning("Siputzx gpt fallback non-200: %s %s", r.status, raw[:300])
+                return None
+
+            js = json.loads(raw)
+            if isinstance(js, dict):
+                data_obj = js.get("data")
+                if isinstance(data_obj, dict):
+                    content = data_obj.get("content")
                     if isinstance(content, str) and content.strip():
                         return content.strip()
 
-            # Format lain yang sering dipakai
-            for key_path in [
-                ("result",),
-                ("data", "result"),
-                ("data", "answer"),
-                ("answer",),
-                ("message",),
-            ]:
-                cur = js
-                ok = True
-                for k in key_path:
-                    if isinstance(cur, dict) and k in cur:
-                        cur = cur[k]
-                    else:
-                        ok = False
-                        break
-                if ok and isinstance(cur, str) and cur.strip():
-                    return cur.strip()
-
-            # Last resort: string value pertama
-            for v in js.values():
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-
-        return None
-
-    except asyncio.TimeoutError:
-        return None
+                # alternatif
+                for k in ("result", "answer", "message", "data"):
+                    v = js.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+            return None
     except Exception:
-        log.exception("Error call_siputzx")
+        log.exception("Error call_siputzx (fallback)")
         return None
 
 
@@ -162,7 +220,6 @@ async def call_siputzx(prompt: str, role: str, timeout_s: int = 25) -> Optional[
 # COMMANDS
 # =========================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _ = get_chat_cfg(update.effective_chat.id)
     text = (
         "Oke, gue online.\n\n"
         "Perintah:\n"
@@ -170,7 +227,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /chat off — matiin auto-reply\n"
         "• /setrole <teks> — atur gaya/role chatbot\n"
         "• /role — lihat role saat ini\n\n"
-        "Mode default: bot cuma bales kalau kamu reply ke pesan bot."
+        "Default: bot cuma bales kalau kamu *reply* ke pesan bot."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -222,7 +279,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
 
-    # Trigger:
+    # Trigger rules:
     # 1) user reply ke pesan bot
     replied_to_bot = False
     if msg.reply_to_message and msg.reply_to_message.from_user:
@@ -234,23 +291,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     role = cfg.get("role") or DEFAULT_ROLE
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    # typing...
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    answer = await call_siputzx(prompt=user_text, role=role)
+    answer = await call_siputzx(prompt=user_text, role=role, context=context)
     if not answer:
         answer = fallback_reply(user_text)
 
-    try:
-        await msg.reply_text(answer[:4000], disable_web_page_preview=True)
-    except Exception:
-        await msg.reply_text(answer[:3500], disable_web_page_preview=True)
+    # Selalu reply ke pesan user yang ditanya
+    answer = answer.strip()
+    if len(answer) > 4000:
+        answer = answer[:4000]
+
+    await msg.reply_text(answer, disable_web_page_preview=True)
 
 
 # =========================
 # ERROR HANDLER
 # =========================
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log.exception("Unhandled error", exc_info=context.error)
+    log.exception("Unhandled error: %s", context.error)
 
 
 # =========================
@@ -269,6 +329,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT | filters.Caption(), handle_message))
 
     app.add_error_handler(on_error)
+
+    # Pastikan session aiohttp ditutup pas shutdown
+    app.post_shutdown.append(close_session)
 
     log.info("Bot running...")
     app.run_polling(close_loop=False)
