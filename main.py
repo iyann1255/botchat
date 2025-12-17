@@ -25,38 +25,24 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8310675088:AAFCjnUBSwwQi8ADjITPOe6hMcdBgWInR
 if not BOT_TOKEN:
     raise SystemExit("ENV BOT_TOKEN belum diisi.")
 
-FAST_TIMEOUT = float(os.getenv("FAST_TIMEOUT", "4"))  # detik, 4-8 recommended
+FAST_TIMEOUT = float(os.getenv("FAST_TIMEOUT", "4"))  # detik
 DATA_FILE = os.getenv("DATA_FILE", "chatbot_data.json")
 
-DEFAULT_ROLE = (
-    "Kamu lagi ngebales chat di grup Telegram.\n"
-    "Gaya bahasa gaul sehari-hari ala gen z.\n\n"
-
-    "Aturan WAJIB:\n"
-    "- Jawaban sangat singkat (maks 10–15 karakter).\n"
-    "- Reaksi cepat, komentar spontan.\n"
-    "- Fokus ke respons emosional, bukan penjelasan.\n"
-    "- Jangan bertanya apa pun.\n"
-    "- Jangan menawarkan bantuan.\n"
-    "- Jangan ngaku bot atau AI.\n"
-    "- Jangan sok informatif.\n\n"
-
-    "Contoh gaya:\n"
-    "• \"anjay\"\n"
-    "• \"wkwk iya\"\n"
-    "• \"buset\"\n"
-    "• \"relate sih\"\n\n"
-
-    "Intinya: kayak orang bales chat, bukan mikir."
+DEFAULT_ROLE = ( "Kamu adalah seorang yang lagi ngebalesin chat di dalam group chat. Balasanmu harus menggunakan bahasa gaul sehari-hari  ala anak gen z, sangat singkat, dan responsif. Balasan tidak perlu selalu formal atau informatif, fokus saja pada reaksi emosional atau komentar cepat. \n"
+"Jangan pernah menawarkan bantuan dan bertanya. \n"
+"Jangan ngaku bot atau AI. \n"
+"Jawaban singkat Maksimal 10 - 15 karakter. \n"
 )
-
 
 SIPUTZX_GPT3_URL = os.getenv("SIPUTZX_GPT3_URL", "https://api.siputzx.my.id/api/ai/gpt3").strip()
 SIPUTZX_GPT_URL = os.getenv("SIPUTZX_GPT_URL", "https://apis-liart.vercel.app/api/gpt").strip()
 
-# Hard limiter settings (biar selalu singkat)
-MAX_SENTENCES = int(os.getenv("MAX_SENTENCES", "2"))   # 1 atau 2 recommended
-MAX_CHARS = int(os.getenv("MAX_CHARS", "280"))         # 200-320 enak buat chat
+# Hard limiter settings (biar selalu super singkat)
+MAX_SENTENCES = int(os.getenv("MAX_SENTENCES", "1"))   # paksa 1 kalimat
+MAX_CHARS = int(os.getenv("MAX_CHARS", "15"))          # paksa 10-15 karakter
+
+# Auto delete mention (@username)
+MENTION_REGEX = re.compile(r"@\w+", re.UNICODE)
 
 # =========================
 # LOGGING
@@ -105,40 +91,58 @@ def get_chat_cfg(chat_id: int) -> Dict[str, Any]:
 # =========================
 # RESPONSE LIMITER
 # =========================
-def limit_response(text: str, max_sentences: int = 2, max_chars: int = 280) -> str:
+def limit_response(text: str, max_sentences: int = 1, max_chars: int = 15) -> str:
     if not text:
         return text
 
-    # buang markdown heading / list yang bikin jadi "artikel"
-    text = re.sub(r"^\s*#{1,6}\s+.*$", "", text, flags=re.MULTILINE).strip()
+    text = text.strip()
 
-    # buang bullet list yang suka bikin kepanjangan
+    # buang heading/list biar gak jadi esai
+    text = re.sub(r"^\s*#{1,6}\s+.*$", "", text, flags=re.MULTILINE).strip()
     text = re.sub(r"^\s*[-•]\s+", "", text, flags=re.MULTILINE).strip()
 
-    # potong karakter dulu
-    text = text.strip()
-    if len(text) > max_chars:
-        text = text[:max_chars].rstrip()
-
-    # split kalimat
+    # ambil 1 kalimat dulu
     parts = re.split(r'(?<=[.!?])\s+', text)
     short = " ".join(parts[:max_sentences]).strip()
+    if not short:
+        short = text
 
-    return short if short else text
+    # paksa max_chars paling akhir
+    short = short.strip()
+    if len(short) > max_chars:
+        short = short[:max_chars].rstrip()
+
+    return short
+
+
+# =========================
+# AUTO DELETE @MENTION
+# =========================
+async def auto_delete_mention(msg, bot_id: int) -> bool:
+    """
+    Hapus pesan kalau ada @username (termasuk spam model kamu).
+    Bot harus admin + izin delete.
+    """
+    try:
+        if msg.from_user and msg.from_user.id == bot_id:
+            return False  # jangan hapus pesan bot sendiri
+
+        text = msg.text or msg.caption or ""
+        if MENTION_REGEX.search(text):
+            await msg.delete()
+            return True
+    except Exception:
+        # kalau bot bukan admin / gak punya izin, akan gagal di sini
+        pass
+    return False
 
 
 # =========================
 # FALLBACK LOCAL REPLY
 # =========================
-def fallback_reply(user_text: str) -> str:
-    t = (user_text or "").strip().lower()
-    if not t:
-        return "Ketik dulu dong."
-
-    if t in {"hai", "halo", "hi", "p"}:
-        return "Halo. Kenapa?"
-
-    return "Lagi error bentar, coba ulang ya."
+def fallback_reply(_: str) -> str:
+    # fallback super pendek biar konsisten
+    return "wkwk"
 
 
 # =========================
@@ -197,7 +201,7 @@ async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYP
                         if isinstance(v, str) and v.strip():
                             return v.strip()
             else:
-                log.warning("Siputzx gpt3 non-200: %s %s", r.status, raw[:300])
+                log.warning("Siputzx gpt3 non-200: %s %s", r.status, raw[:200])
     except Exception:
         log.exception("Error call_siputzx (gpt3)")
 
@@ -208,7 +212,7 @@ async def call_siputzx(prompt: str, role: str, context: ContextTypes.DEFAULT_TYP
         async with session.get(url) as r:
             raw = await r.text()
             if r.status != 200:
-                log.warning("Siputzx gpt fallback non-200: %s %s", r.status, raw[:300])
+                log.warning("Siputzx gpt fallback non-200: %s %s", r.status, raw[:200])
                 return None
 
             js = json.loads(raw)
@@ -281,6 +285,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = get_chat_cfg(chat_id)
 
     msg = update.message
+
+    # 🔥 AUTO DELETE kalau ada @mention
+    if await auto_delete_mention(msg, bot_id=context.bot.id):
+        return
+
     user_text = (msg.text or msg.caption or "").strip()
     if not user_text:
         return
@@ -308,7 +317,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not answer:
         answer = fallback_reply(user_text)
 
-    # paksa pendek
+    # 🔥 paksa super pendek (10–15 karakter)
     answer = limit_response(answer, max_sentences=MAX_SENTENCES, max_chars=MAX_CHARS)
 
     await msg.reply_text(answer, disable_web_page_preview=True)
