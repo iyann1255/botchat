@@ -26,32 +26,26 @@ if not BOT_TOKEN:
     raise SystemExit("ENV BOT_TOKEN belum diisi.")
 
 FAST_TIMEOUT = float(os.getenv("FAST_TIMEOUT", "4"))  # detik, 4-8 recommended
-
 DATA_FILE = os.getenv("DATA_FILE", "chatbot_data.json")
 
 DEFAULT_ROLE = (
     "Nama kamu Yan.\n"
     "Kamu manusia biasa yang lagi nongkrong di grup Telegram.\n"
     "Bukan bot, bukan AI, dan gak pernah bahas soal itu.\n\n"
-
     "Aturan main:\n"
     "- Jawaban singkat, idealnya 1 kalimat (maks 2–3 kalau kepepet).\n"
     "- Gak suka jelasin panjang kecuali diminta.\n"
     "- Kalau bisa jawab pendek, jangan dipanjangin.\n\n"
-
     "Gaya ngobrol:\n"
     "- Santai, gen-z, natural kayak chat harian.\n"
     "- Kadang cuek, kadang becanda tipis.\n"
     "- Boleh 0–1 emoji, jangan lebay.\n"
     "- Gak kaku, gak baku, gak sok pinter.\n\n"
-
     "Kalau ditanya 'kamu bot?' atau sejenisnya:\n"
     "- Ngeledek ringan, ngeles santai, ganti topik.\n\n"
-
     "Intinya:\n"
     "Balas kayak orang asli yang lagi bales chat, bukan kayak sistem."
 )
-
 
 SIPUTZX_GPT3_URL = os.getenv("SIPUTZX_GPT3_URL", "https://api.siputzx.my.id/api/ai/gpt3").strip()
 SIPUTZX_GPT_URL = os.getenv("SIPUTZX_GPT_URL", "https://apis-liart.vercel.app/api/gpt").strip()
@@ -90,7 +84,7 @@ def load_data() -> None:
 
 def save_data() -> None:
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
+        with open(DATA_FILE", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         log.exception("Gagal save data.")
@@ -114,6 +108,9 @@ def limit_response(text: str, max_sentences: int = 2, max_chars: int = 280) -> s
     # buang markdown heading / list yang bikin jadi "artikel"
     text = re.sub(r"^\s*#{1,6}\s+.*$", "", text, flags=re.MULTILINE).strip()
 
+    # buang bullet list yang suka bikin kepanjangan
+    text = re.sub(r"^\s*[-•]\s+", "", text, flags=re.MULTILINE).strip()
+
     # potong karakter dulu
     text = text.strip()
     if len(text) > max_chars:
@@ -123,7 +120,6 @@ def limit_response(text: str, max_sentences: int = 2, max_chars: int = 280) -> s
     parts = re.split(r'(?<=[.!?])\s+', text)
     short = " ".join(parts[:max_sentences]).strip()
 
-    # kalau gak ada tanda baca, minimal tetap max_chars
     return short if short else text
 
 
@@ -289,6 +285,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.reply_to_message and msg.reply_to_message.from_user:
         replied_to_bot = (msg.reply_to_message.from_user.id == context.bot.id)
 
+    # hanya jawab kalau /chat on ATAU user reply ke bot
     if not replied_to_bot and not cfg.get("enabled", False):
         return
 
@@ -307,11 +304,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not answer:
         answer = fallback_reply(user_text)
 
-    answer = limit_response(answer, max_sentences=MAX_SENTENCES, max_chars=MAX_CHARS)
-
-    await msg.reply_text(answer, disable_web_page_preview=True)
-
-    # 🔥 paksa pendek (ini yang bikin gak jadi esai)
+    # paksa pendek
     answer = limit_response(answer, max_sentences=MAX_SENTENCES, max_chars=MAX_CHARS)
 
     await msg.reply_text(answer, disable_web_page_preview=True)
@@ -342,7 +335,11 @@ def main():
     app.add_handler(CommandHandler("setrole", setrole_cmd))
     app.add_handler(CommandHandler("role", role_cmd))
 
-    app.add_handler(MessageHandler(filters.TEXT | filters.Caption(), handle_message))
+    # penting: jangan nangkep command sebagai chat biasa
+    app.add_handler(
+        MessageHandler(((filters.TEXT & ~filters.COMMAND) | filters.Caption), handle_message)
+    )
+
     app.add_error_handler(on_error)
 
     log.info("Bot running...")
