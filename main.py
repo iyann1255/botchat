@@ -84,7 +84,7 @@ def load_data() -> None:
 
 def save_data() -> None:
     try:
-        with open(DATA_FILE", "w", encoding="utf-8") as f:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         log.exception("Gagal save data.")
